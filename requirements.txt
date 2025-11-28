@@ -1,0 +1,7 @@
+﻿fastapi
+uvicorn[standard]
+sqlmodel
+sqlalchemy
+pymysql
+pydantic-settings
+
