@@ -4,7 +4,7 @@ from sqlmodel import Session, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.db import init_db, get_session
-from app.models import Project, Environment, SDKKey
+from app.models import Project, Environment, SDKKey, FeatureFlag, FeatureVariant, FeatureRule
 from app.routers import sdk
 
 @asynccontextmanager
@@ -97,6 +97,70 @@ def list_keys(session: Session = Depends(get_session)):
 """
 Get/keys
 tüm sdk key kayıtlarını getiriyoruz.
+"""
+
+@app.post("/flags", response_model=FeatureFlag)
+def create_flag(flag: FeatureFlag, session: Session = Depends(get_session)):
+    if not session.get(Project, flag.project_id):
+        raise HTTPException(404, "Project not found")
+    session.add(flag); session.commit(); session.refresh(flag)
+    return flag
+"""
+post/flags
+istek gövdesindeki jsonu'u alıp featureFlag nesnesine çevirdikten sonra bir if koşulu içerisinde bu flag'ın içerisinde yer alan project_id'nin gerçekten var olup olmadığı kontrolunu yapıyoruz.varsa flag veri tabanına bilgileri yüklüyor
+yoksa 404 hatası fırlatıyor.En sonunda ise db'nin verdiği id gibi alanları geri dönderiyor(json olarak)
+"""
+
+@app.get("/flags", response_model=list[FeatureFlag])
+def list_flags(session: Session = Depends(get_session)):
+    return session.exec(select(FeatureFlag)).all()
+"""
+get/flags
+veritabanındaki tüm featureflag kayıtlarını json olarak listeliyor.
+"""
+
+@app.post("/flags/{flag_id}/variants", response_model=FeatureVariant)
+def create_variant(flag_id: int, v: FeatureVariant, session: Session = Depends(get_session)):
+    if not session.get(FeatureFlag, flag_id):
+        raise HTTPException(404, "Flag not found")
+    v.flag_id = flag_id
+    session.add(v); session.commit(); session.refresh(v)
+    return v
+"""
+post/flags/{flag_id}/variants
+url'deki flag_id'ye bir varyant eklemek için oluşturulmuş bir endpointtir.bu flag_id ye sahip herhangi bir satır bulunmuyorsa hata 404 fırlatıyor.
+"""
+@app.get("/flags/{flag_id}/variants", response_model=list[FeatureVariant])
+def list_variants(flag_id: int, session: Session = Depends(get_session)):
+    return session.exec(select(FeatureVariant).where(FeatureVariant.flag_id == flag_id)).all()
+"""
+get/flags/{flag_id}/variants
+url'deki flag_id'yi alıp featurevariant tablosundaki flag_id ile aynı olan bütün sonuçları getirir.
+"""
+
+# ------- Rules -------
+@app.post("/flags/{flag_id}/rules", response_model=FeatureRule)
+def create_rule(flag_id: int, r: FeatureRule, session: Session = Depends(get_session)):
+    if not session.get(FeatureFlag, flag_id):
+        raise HTTPException(404, "Flag not found")
+    if not session.get(Environment, r.environment_id):
+        raise HTTPException(404, "Environment not found")
+    r.flag_id = flag_id
+    session.add(r); session.commit(); session.refresh(r)
+    return r
+"""
+post/flags/{flag_id}/rules
+flag'e kural eklemek için oluşturulmuş endpointtir.
+Url'de yer alan flag_id gerçekten var mı kontrolu yapılır,ardından bu kuralı kullanmak için yazdığımız ortam bu flag için var mı kontrolunu yapıyoruz,eğer ki bu if koşullarına 
+girmezse de kuralımızı ekliyoruz.
+"""
+
+@app.get("/flags/{flag_id}/rules", response_model=list[FeatureRule])
+def list_rules(flag_id: int, session: Session = Depends(get_session)):
+    return session.exec(select(FeatureRule).where(FeatureRule.flag_id == flag_id)).all()
+"""
+get/flags/{flag_id}/rules
+url'deki flag_id'ye sahip olan tüm kuralları listeler.
 """
 
 app.include_router(sdk.router, prefix="/sdk/v1", tags=["sdk"])
