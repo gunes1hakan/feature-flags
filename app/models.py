@@ -1,8 +1,6 @@
 ﻿from typing import Optional
-from sqlmodel import SQLModel, Field
-from typing import Optional
 from sqlmodel import SQLModel, Field, Column
-from sqlalchemy import JSON
+from sqlalchemy import JSON, UniqueConstraint
 """
 bu class yapısı database'de project,environment ve sdkkey adında tablolarda işlem yapmamızı sağlar.
 """
@@ -15,6 +13,7 @@ class Project(SQLModel, table=True):
 """
 
 class Environment(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_env_project_name"))
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     project_id: int = Field(foreign_key="project.id", index=True)
@@ -26,6 +25,8 @@ class Environment(SQLModel, table=True):
     id:1   name:dev    project_id:1
     id:2   name:prod   project_id:1
     göründüğü gibi project_id'si 1 olan ürünün yani shop ürününün farklı ortamları için tablosu oluşturulmuş oldu.
+    güncelleme: projeye ek olarak en üstte doğrulama adımı ekledik,uniqueConstraint adımı veritabanına normalde bu sütunda birden fazla aynı değere sahip ifadeye yer verme der,ama biz burda ekstra 
+    olarak iki sütun girdik yani biri project_id,diğeri de name sütunudur.Yani veri tabanına daha önceden var olan project_id veya name alanına sahip olan bir eleman eklenecekse,db hata fırlat diyoruz.
     """
 
 class SDKKey(SQLModel, table=True):
@@ -44,10 +45,12 @@ swagger'da verilen name'in aynı olup olmadığı karşılaştırılıyor,eğer 
 """
 
 class FeatureFlag(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("project_id", "key", name="uq_flag_project_key"))
     id: Optional[int] = Field(default=None, primary_key=True)
     key: str = Field(index=True)               
     on: bool = True
     default_variant: str = "off"
+    status: str = Field(default="draft", index=True)  # draft | active | published
     project_id: int = Field(foreign_key="project.id", index=True)
 """
 -yukarıdaki kod yapısı db'de bulunan featureflag tablosu ile ilgilenmektedir.bu tabloda yer alan id kısmı primary key olarak ayarlanmış,
@@ -57,15 +60,18 @@ uygulamamız ile uyumlu olacak şekilde "enable_dark_mode" ismini verebiliriz.
 -default_variant ise kurallara uyulmadığında ya da özel bir dağıtım yoksa hangi varyant'ın kullanılacağını göstermektedir.bu default_variant'da off ifadesi varsayılanları kullan demektir ve de biz varsayılan olarak karanlık temayı kullanıcılara
 kapattık,ama başka bir kullanım olan dark özelliğini de default_variant'a ekleyebiliriz,bu da karanlık tema modunu kullanıcıların kullanımına sunar.
 -project_id ise bu flag'imizin hangi projeye ait olduğunu getirir.
+-güncelleme:en üstteki kod yapısını zaten biliyoruz,ekstra olarak yapıtığımız projenin durumunu anlamak için status diye bir sütun ekledik,bu sütun draft,active,published diye değerleri tutuyoruz.varsayılan olarak draft değerini atıyoruz:
+draft değeri yeni bir flag ekliyorum ama bu kodu halen yazıyorum,bu kod kullanıcıya gösterilmiyor ve başka kod yapıları tarafından çağrılmıyor,yani yapım aşamasında.
+active değeri bir tane flag'in tamamlandığını kullanıcının kullanacabileceğini ama herhangi bir sıkıntı yaşanma durumuna karşı durumun sürekli izlendiğini belirtiyor.
+published değeri ise artık bu flag'in final versiyonu olduğunu belirtir.
 """
+
 class FeatureVariant(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("flag_id", "name", name="uq_variant_flag_name"))
     id: Optional[int] = Field(default=None, primary_key=True)
     flag_id: int = Field(foreign_key="featureflag.id", index=True)
     name: str                                   
-    payload: dict = Field(
-        default_factory=dict,
-        sa_column=Column(JSON)                  
-    )
+    payload: dict = Field(default_factory=dict,sa_column=Column(JSON))
 """
 bu class yapısında oluşturucağımız flag'in farklı varyantlarını oluşturuyoruz,örnek vermek gerekirse,yukarıdaki sınıfta karanlık temayı bir flag olarak seçelim demiştik,ama bu karanlık temanın bazı özel durumlara göre nasıl davranacağı hakkında
 özel varyantlar tanımlayabiliriz.örnek vermek gerekirse:
