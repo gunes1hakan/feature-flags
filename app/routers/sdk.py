@@ -46,10 +46,15 @@ async def get_flags(
 
     #Bu projenin flag'lerini getir
     flags = session.exec(
-        select(FeatureFlag).where(FeatureFlag.project_id == sdk.project_id)
+        select(FeatureFlag).where(
+            FeatureFlag.project_id == sdk.project_id,
+            FeatureFlag.status.in_(["active", "published"])
+        )
     ).all()
     """
     yukarıda değerini aldığımız sdk'nin id'sine sahip olan tüm flag yapıların getiriyoruz.
+    Güncelleme:
+    -ek olarak sorguya status yapısı eklendi.böylece artık draft gibi flagler sdk'ya yönlendirilmeyecek.
     """
 
     out_flags = []
@@ -89,6 +94,7 @@ async def get_flags(
             "default_variant": f.default_variant,
             "variants": variants_map,
             "rules": rules_out,
+            "status": f.status,
         })
 
     return {        #en sonunda sdk'nin kullanacağı tek bir json verisi şeklinde bilgileri geri dönderiyoruz.
