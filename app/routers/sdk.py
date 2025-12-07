@@ -1,6 +1,7 @@
 ﻿from fastapi import APIRouter, Header, HTTPException, Query, Depends
 from sqlmodel import Session, select
 from app.core.db import get_session
+from app.core.cache import cache_get_json, cache_set_json
 from app.models import Environment, SDKKey, FeatureFlag, FeatureVariant, FeatureRule
 
 router = APIRouter()
@@ -42,6 +43,17 @@ async def get_flags(
     gönderdiğimiz key değerininin environment id değerini sdkkey tablosundan alıyoruz.
     eğer ki en yukarıda tanımladığımız get_flags ile aldığımız sdk_key değeri var ve de yukarıda env var mı kontrolu ile aldığımız environment değeri
     tabloda varsa ise ilgili satırı alıyoruz,yoksa 401 hatası ile de geçerli key girilmedi hatası fırlatıyoruz.
+    """
+
+    cache_key = f"ff:flags:{sdk.project_id}:{environment.id}"
+    cached = await cache_get_json(cache_key)
+    if cached:
+        return cached  # HIT
+    """
+    ilk kod satırında yer alan cache_key oluşturulurken ilk olarak sdk.project_id ile sdk key'in bağlı olduğu projenin id'si alınıyor,environment.id ile bu isteğin geldiği environment.id alınıyor. ff:flags: ifadesi de sadece anlamlı bir 
+    prefix ifadedir.
+    ikinci kod satırı ile de oluşturduğumuz bu key değerini cache.py dosyasındaki cache_get_json() metotuna yaz diyoruz.böylece bu redise bu key ile kaydedilmiş herhangi json varsa alıyoruz.
+    eğer önceden Redis'te hazırlanmış bir cevap varsa bunu geri dönderiyoruz yoksa DB'den verileri kendi almaya gidiyor.
     """
 
     #Bu projenin flag'lerini getir
@@ -97,9 +109,16 @@ async def get_flags(
             "status": f.status,
         })
 
-    return {        #en sonunda sdk'nin kullanacağı tek bir json verisi şeklinde bilgileri geri dönderiyoruz.
+    resp = {
         "env": env,
         "revision": "demo-rev",
         "flags": out_flags,
         "configs": {},
-    }
+    }    
+
+    await cache_set_json(cache_key, resp, ttl_seconds=120)  # MISS → SET
+    """
+    rediste bu bilgileri saklıyoruz.
+    """
+
+    return resp #en sonunda sdk'nin kullanacağı tek bir json verisi şeklinde bilgileri geri dönderiyoruz.
