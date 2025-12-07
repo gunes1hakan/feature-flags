@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.db import init_db, get_session
+from app.core.cache import invalidate_project_sync
 from app.models import Project, Environment, SDKKey, FeatureFlag, FeatureVariant, FeatureRule
 from app.routers import sdk
 
@@ -56,6 +57,7 @@ def create_env(env: Environment, session: Session = Depends(get_session)):
         session.add(env)
         session.commit()
         session.refresh(env)
+        invalidate_project_sync(env.project_id)
         return env
     except IntegrityError:
         session.rollback()
@@ -67,6 +69,8 @@ yeni bir environment (ör: prod,dev) oluşturuyor.
 oluşturma yapmadan önce project_id var mı yok mu kontrolu yapıyor(yoksa 404 fırlatıyor.)
 models dosyamda yer alan environment tablomda bir kontrol eklemiştim,aynı özelliklere sahip bir satır eklendiğinde db IntegrityError fırlatıyordu,bu hatayı Fast API yakalıyordu ama 500(Internal Server Error) olarak
 yakalıyordu,biz bu hatayı daha anlamlı bir hale getirebilmek için try extcept bloğu ekledik.
+Güncelleme:
+invalidate_project_sync(env.project_id) kod satırı env tablosunda herhangi bir değişiklik yapıtığımızda ilgili id'ye sahip olan json bilgilerini cache'den silmektedir.
 """
 
 @app.get("/envs", response_model=list[Environment])
@@ -88,6 +92,7 @@ def create_key(k: SDKKey, session: Session = Depends(get_session)):
         session.add(k)
         session.commit()
         session.refresh(k)
+        invalidate_project_sync(k.project_id)
         return k
     except IntegrityError:
         session.rollback()
@@ -97,6 +102,7 @@ Post/keys
 yeni bir sdk key eklemesi yapıyoruz,ama eklemeyi tam yapmadan önce eklenecek olan projenin veya environment'in gerçekten var olup olmadığına bakıyoruz,
 eğer yoksa hata fırlatıyoruz.
 sonrasında ise ürünleri ekliyoruz,ama except içerisinde bir catch bloğu kontrolu yapıyoruz,eğer ki key varsa 409 hata kodu ile sdk key zaten var hatası fırlatıyoruz.
+Güncelleme:invalidate_project_sync(k.project_id) satırı ilgili bilgileri cache'den siliyor.
 """
 
 @app.get("/keys", response_model=list[SDKKey])
@@ -115,6 +121,7 @@ def create_flag(flag: FeatureFlag, session: Session = Depends(get_session)):
         raise HTTPException(404, "Project not found")
     try:
         session.add(flag); session.commit(); session.refresh(flag)
+        invalidate_project_sync(flag.project_id)
         return flag
     except IntegrityError:
         session.rollback()
@@ -126,6 +133,7 @@ yoksa 404 hatası fırlatıyor.En sonunda ise db'nin verdiği id gibi alanları 
 Güncelleme:
 ilk if kontrolu ile status alanına "draft", "active", "published" ifadelerinden başka bir şey yazldığında hata fırlatılmasını sağladık.
 ek olarak aynı key değerine sahip olan herhangi bir satır eklendiği zaman 409 hatası fırlatıyoruz.
+Güncelleme2:  invalidate_project_sync(flag.project_id) satırı ile ilgili bilgiler cache'den siliniyor.
 """
 
 @app.get("/flags", response_model=list[FeatureFlag])
@@ -151,23 +159,27 @@ def update_flag_status(flag_id: int, body: StatusUpdate, session: Session = Depe
         raise HTTPException(404, "Flag not found")
     f.status = body.status
     session.add(f); session.commit(); session.refresh(f)
+    invalidate_project_sync(f.project_id)
     return f
 """
 bilgileri girilen satırın status'unu güncellemek için:
 1-öncelikle gönderilen ifadenin "draft", "active", "published" olup olmadığına bakıyoruz,değilse hata fırlatıyoruz
 2-id ile gerçekten böyle bir flag var mı kontrolu yapıyoruz.
 3-ardından güncelleme işlemlerimizi yapıyoruz.
+Güncelleme: invalidate_project_sync(f.project_id) satırı ile ilgili yenilenmiş bilgiler cache'den siliniyor.
 """
 
 @app.post("/flags/{flag_id}/variants", response_model=FeatureVariant)
 def create_variant(flag_id: int, v: FeatureVariant, session: Session = Depends(get_session)):
-    if not session.get(FeatureFlag, flag_id):
+    f = session.get(FeatureFlag, flag_id)
+    if not f:
         raise HTTPException(404, "Flag not found")
     if not v.name or v.name.strip() == "":
         raise HTTPException(422, "Variant name is required")
     v.flag_id = flag_id
     try:
         session.add(v); session.commit(); session.refresh(v)
+        invalidate_project_sync(f.project_id)
         return v
     except IntegrityError:
         session.rollback()
@@ -178,6 +190,8 @@ url'deki flag_id'ye bir varyant eklemek için oluşturulmuş bir endpointtir.bu 
 Güncelleme:
 variant kısmına boş input girilmesi engellendi.
 ilgili flagda zaten aynı variant varsa bu engellendi.
+Güncelleme2:
+yeni bir f değişkeni oluşturuldu.invalidate_project_sync(f.project_id) satırı ile cache'de ilgili veriler temizlendi.
 """
 @app.get("/flags/{flag_id}/variants", response_model=list[FeatureVariant])
 def list_variants(flag_id: int, session: Session = Depends(get_session)):
@@ -247,6 +261,7 @@ def create_rule(flag_id: int, r: FeatureRule, session: Session = Depends(get_ses
 
     r.flag_id = flag_id
     session.add(r); session.commit(); session.refresh(r)
+    invalidate_project_sync(f.project_id)
     return r
 """
 post/flags/{flag_id}/rules
@@ -259,7 +274,7 @@ Güncelleme:
 -existing alanında ise eklenecek olan flag'in id'sine göre ilgili satırın bütün verileri çekiliyor,sonrasında ise bu çekilen bilgiler bir for döngüsü ile dolaşılıyor ve name kısımları bir set haline getiriliyor
 ardından varsayılan(ör:"off") default_variant ile de birleştirerek variant_isimlerini içerecek bir set yapısı elde etmiş oluyoruz,ve eklenecek olan verinin variant ismini ve yüzdesini kontrol etmek için gerekli
 metotu çağırıyoruz.
-
+Güncelleme2: invalidate_project_sync(f.project_id) satırı ile ilgili veriler cache'den silindi.
 """
 
 @app.get("/flags/{flag_id}/rules", response_model=list[FeatureRule])
