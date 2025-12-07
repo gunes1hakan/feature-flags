@@ -13,7 +13,7 @@ class Project(SQLModel, table=True):
 """
 
 class Environment(SQLModel, table=True):
-    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_env_project_name"))
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_env_project_name"),)
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     project_id: int = Field(foreign_key="project.id", index=True)
@@ -45,7 +45,7 @@ swagger'da verilen name'in aynı olup olmadığı karşılaştırılıyor,eğer 
 """
 
 class FeatureFlag(SQLModel, table=True):
-    __table_args__ = (UniqueConstraint("project_id", "key", name="uq_flag_project_key"))
+    __table_args__ = (UniqueConstraint("project_id", "key", name="uq_flag_project_key"),)
     id: Optional[int] = Field(default=None, primary_key=True)
     key: str = Field(index=True)               
     on: bool = True
@@ -67,7 +67,7 @@ published değeri ise artık bu flag'in final versiyonu olduğunu belirtir.
 """
 
 class FeatureVariant(SQLModel, table=True):
-    __table_args__ = (UniqueConstraint("flag_id", "name", name="uq_variant_flag_name"))
+    __table_args__ = (UniqueConstraint("flag_id", "name", name="uq_variant_flag_name"),)
     id: Optional[int] = Field(default=None, primary_key=True)
     flag_id: int = Field(foreign_key="featureflag.id", index=True)
     name: str                                   

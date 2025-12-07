@@ -4,4 +4,4 @@ sqlmodel
 sqlalchemy
 pymysql
 pydantic-settings
-
+redis
