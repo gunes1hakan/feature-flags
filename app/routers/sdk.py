@@ -1,10 +1,11 @@
-﻿from fastapi import APIRouter, Header, HTTPException, Query, Depends
+﻿from fastapi import APIRouter, Header, HTTPException, Query, Depends, Body
 from typing import Dict, Any, List
 from collections import defaultdict
 from sqlmodel import Session, select
 from app.core.db import get_session
 from app.core.cache import cache_get_json, cache_set_json
 from app.models import Environment, SDKKey, FeatureFlag, FeatureVariant, FeatureRule
+from app.core.eval import evaluate_one_flag
 
 router = APIRouter()
 
@@ -109,6 +110,125 @@ async def get_flags(
 
 
     return {"env": env, "project_id": sdk.project_id, "flags": out_flags}
+
+@router.post("/evaluate")
+async def evaluate_flags(
+    env: str = Query(..., description="Hedef ortam (örn: prod, dev, staging)"),
+    x_sdk_key: str = Header(alias="X-SDK-Key"),
+    user: Dict[str, Any] = Body(..., embed=True),
+    session: Session = Depends(get_session),
+):
+    """
+    main kısmında topladığımız endpointler admin endpointleridir,yani bilgi ekleme değiştirme gibi özellikleri bulunmaktadır,client(yani mobil,swagger) istemcilerden gelen get isteklerini ise ayrı bir sayfada toplamak istedik,
+    işte bu endpointleri sdk.py dosyasında topladık,bu endpointleri main'deki endpointlerle birleştirmek için router kullanıyoruz,bu yüzden bu endpointlerimin başında @router ifadesi bulunmaktadır.
+    bu routerların çağrısı main.py dosyamın içerisinde app.include_router(sdk.router, prefix="/sdk/v1", tags=["sdk"]) satırı ile toplanmaktadır.çünkü bizim router ifademizde main.py dosyasında olduğu gibi dış dünyaya fastapiyi
+    kullanarak bağlanmamızı sağlayan app = FastAPI(title="Feature Flags & Remote Config", lifespan=lifespan) kodu yok,bu yüzden bu endpointleri main.py dosyası içerisindeki endpointlerle birleştirmemiz gerekiyor,işte bu yüzden
+    app.include_router(sdk.router, prefix="/sdk/v1", tags=["sdk"]) bu kod satırını kullanıyoruz.Bu kod satırının detayına girersek bu satırın ilk parametresi der ki sdk.router endpointlerini al,ardından bu endpointin başına 
+    2. parametre der ki /sdk/v1 ifadesini ekle,böylece endpoint ismimiz /sdk/v1/evaluate olur,3. parametresi ise bu endpointin swagger arayüzünde sdk adı altında toplanmasını sağlar.
+    Şimdi bu metotun içerisine geçelim ve parametrelerini tek tek analiz edelim:
+    env ifadesi gelen http isteğindeki env adlı  ifadeyi alıp env adlı değişkene atar,ör: POST /sdk/v1/evaluate?env=prod adlı bir http isteği geldi diyelim,bu isteğin sonundaki ? ifadesi http'nin ek olarak bir string ifade aldığını
+    belirtir,bu string ifade de ise env=prod olarak tanımlanmış,yani bu örnek üzerinden ilerlersek parametre olan env değişkenine prod değerini atamış oluruz.description kısmı ise swagger'da açıklama eklememizi sağlamaktadır.
+    ikinci parametre olan x_sdk_key'e geçersek.bu ifadede de gelen endpoint'teki Header verisini alıyor,bu satırı detaylı olarak açarsak,x_sdk_key'e gelecek olan değerin Header'dan geleceğini söylüyoruz yani url'den ya da query'den
+    değil bu bilgiyi Header'dan alacaksın diyoruz,sonrasında ise bu bilgiyi X-SDK-Key adlı header'dan alacaksın diyoruz.
+    şimdi metot içerisindeki 3. parametreye geçelim: bu parametre gelen user bilgilerini alıp bir dict'e atıyor.Body kısmına geçmeden önce şunu belirteyim,bu fonksiyonumuz bir post ifadesi olduğuna göre bir veri eklemesi yapacak,bu veriyi
+    de alması gerekiyor,işte bu veriler FastAPI'de 3 yerden gelebilir,ya Query'den(ör: ?env:prod),ya Header'dan (ör: X-SDK-Key: demo3) ya da Body'den yani bir json gövdesinden gelir.işte biz burda user bilgilerini Body'den alacağız.
+    . . . ifadesi Body'den gelen isteğin zorunlu olduğunu belirtiyor yani Body'den herhangi bir bilgi gelmezse geriye hata dönderirecek,embed=True ifadesi ise Body'den gelen bilginin user adı altında toplanmasını istiyor,yani normalde
+    atıyorum body'den şöyle bir bilgi geliyor diyelim: {"country": "TR","is_premium": true,"user_id": "u123"} biz bu gelen veriyi {"user": { "country": "TR", "user_id": "u123" }} şeklinde alıyoruz,bu verileri user şeklinde gruplamamızın
+    sebebi body'den gelen verilerin sadece user olarak gelmemesidir(örnek olarak verdiğimiz body'nin içeriğindeki bilgiler sadece user içeriyor ama altta daha geniş bir body verisi var),yani gelen bilgileri 
+    {"user": { "country": "TR", "user_id": "u123" },"flag_keys": ["enable_dark_mode", "new_checkout"],"debug": true} şeklinde gruplandırırsak hangi
+    bilginin neye ait olduğunu kolay bir şekilde anlıyoruz.Şimdi bilgiyi bu şekilde düzenledik diyelim: {"user": { "country": "TR", "user_id": "u123" }}.Ardından bu bilgiler dict'te depolanırken key değerleri user olmayacak yine normal
+    key değerleri "country","user_id" olacakken,value değerleri "TR","u123" olacak.
+    session ile de Db bağlantısı kurabilmek için FastAPI'nin bize verdiği bağlantı havuzundan bir tane db bağlantısını alıyoruz.
+    """
+
+    sdk = session.exec(select(SDKKey).where(SDKKey.key == x_sdk_key)).first()
+    if not sdk:
+        raise HTTPException(status_code=401, detail="Invalid SDK key")
+    """
+    yukarıdaki kod satırımız da ise parametre olarak aldığımız x_sdk_key değerini SDKKey adlı tabloda arıyoruz.kod satırına geçersek:
+    select(SDKKey) ifadesi SDKKey adlı tablomuza gider,where(SDKKey.key==x_sdk_key) ifadesi ise bu SDKKey adlı tablodaki key adlı sütundaki değeri x_sdk_key olan verileri alır.exec() ifadesi girdiğimiz bu sorguyu sql cinsine çevirip 
+    DB'de çalıştırır.session ifadesi de zaten db bağlantımızdı.first() ifadesi ise birden fazla veri gelirse ilk veriyi al diyoruz.(normalde zaten models.py içerisinde key: str = Field(index=True, unique=True) satırı ile bu key değerini
+    benzersiz olarak alıyoruz yani zaten tek bir sonuç değeri geriye dönecek,ama olduda bir hata ile karşılaştık ya da oldu da key: str = Field(index=True, unique=True) kodundaki unique ifadesi silindi diyelim,bu durumları da düşünerek 
+    güvenlik acısından ikinci bir doğrulama ekleyerek ilk veriyi aldık.
+    """
+
+
+    environment = session.exec(
+        select(Environment).where(
+            Environment.name == env,
+            Environment.project_id == sdk.project_id
+        )
+    ).first()
+    if not environment:
+        raise HTTPException(status_code=404, detail="Unknown environment for this project")
+    """
+    project id'si project_id olan ama ortamı env olan bilgiyi Environment tablosundan alıp environment değişkenine atıyorum.
+    """
+
+    # 3) Projedeki flag’ler + bu env’in kuralları
+    flags = session.exec(
+        select(FeatureFlag).where(FeatureFlag.project_id == sdk.project_id)
+    ).all()
+    if not flags:
+        return {"env": env, "project_id": sdk.project_id, "variants": {}}
+
+    flag_ids = [int(f.id) for f in flags if f.id is not None]
+    """
+    burda flags içerisindeki verilerin id'sini toplayıp flag_ids adlı listeye atıyoruzki sürekli db'ye gitmeyelim.
+    """
+
+    variants = session.exec(
+        select(FeatureVariant).where(FeatureVariant.flag_id.in_(flag_ids))
+    ).all()
+    variants_by_flag: Dict[int, Dict[str, Dict[str, Any]]] = defaultdict(dict)
+    for v in variants:
+        variants_by_flag[int(v.flag_id)][v.name] = v.payload or {}
+    """
+    bu kod yapısı yukarıda oluşturduğumuz flag_ids liste yapısının içerisindeki tüm flag_id'lerin FeatueVariant adlı tablodan bilgilerini getirir.
+    sonrasında bu bilgileri bir dict'te tutalım diyoruz,bu tuttuğumuz dict ifadesinin ilk parametresi flag_id,ikinci içerdeki dict'in ilk parametresi variant ismini,içerdeki dict'in ilk parametresi ise payload'u tutsun dedik.eğer ki
+    ardından bu variants bilgilerini dolaşarak variants_by_flag adlı sözlüğüme bu bilgileri yolluyorum.ör: flag_id=10, name="dark", payload={"btnColor":"green","font":"large"} diye bir tane db'den bilgi aldık diyelim,buna göre bu sözlük
+    variants_by_flag(10)["dark"]="btnColor":"green","font":"large"} şeklinde bilgileri almış oluyor.
+    """
+
+    rules = session.exec(
+        select(FeatureRule)
+        .where(
+            FeatureRule.flag_id.in_(flag_ids),
+            FeatureRule.environment_id == environment.id,
+        )
+        .order_by(FeatureRule.priority)
+    ).all()
+    rules_by_flag: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for r in rules:
+        rules_by_flag[int(r.flag_id)].append({
+            "priority": r.priority,
+            "predicate": r.predicate or {},
+            "distribution": r.distribution or {},
+        })
+
+    """
+    yukarıdaki ifade her bir flag_id için ve environment_id için kurallar ekliyor.bu kuralları rules_by_flag dict'inde toplayalım dedik ve rules içersiindeki bilgileri tek tek bu dict'e ekledik.
+    """
+
+    # 4) Her flag için tek bir varyant seç
+    decided: Dict[str, str] = {}
+    for f in flags:
+        chosen = evaluate_one_flag(
+            project_id=sdk.project_id,
+            flag_key=f.key,
+            default_variant=f.default_variant,
+            rules=rules_by_flag.get(int(f.id), []),
+            user=user,
+        )
+        decided[f.key] = chosen
+    """
+    yukarıdaki kod yapısı her flag için bir variant oluşturmamızı sağlıyor.bu variant'ları decided adlı bir sözlükte key,variant şeklinde bir key value ilişkisine göre tutacağız.
+    ikinci satırda ise yukarıda aldığımız flags değerlerini tek tek dolaşıyoruz ve eval.py dosyasındaki evaluate_one_flag metotu ile flag değerine bir tane variant atıyoruz,sonrasında da bu variant'ı flag'in keyi ile birleştiriyoruz
+    ve decided adlı sözlüğe yolluyoruz.
+    """
+
+    return {"env": env, "project_id": sdk.project_id, "variants": decided}
+    #en sonunda da bu bilgileri toplu olarak geri dönderiyoruz.
 
 """
     cache_key = f"ff:flags:{sdk.project_id}:{environment.id}"

@@ -42,6 +42,11 @@ Her bir flag ürünü için bir tane özel keyimiz bulunmaktadır.(ör: demo,mob
 öncelikle db de yer alan sdkkey tablomuzdaki yer alan key sütunlarına bakılıyor,eğer ki bizim swagger'da yazdığımız key ile uyuşuyorsa bize environment_id
 ve project_id kısmını geri dönüyor,sonrasında ise yazılan environment tablosuna gidilip bakılıyor ve environment_id'nin yanındaki diğer sütundaki name ile
 swagger'da verilen name'in aynı olup olmadığı karşılaştırılıyor,eğer ki değer doğru ise code numarası 200 olacak şekilde bize sonuçları yazacaktır.
+Güncelleme: biz burda key değerini benzersiz olacak şekilde tanımlıyoruz,o zaman neden bu değeri tabloda primary key olarak oluşturmadık diye düşünebiliriz.
+bunun sebebi key değerini ileri de değiştirebilmemizden dolayıdır,mesela ileri de key değeri demo3 olan keyi daha anlamlı olsun diye yarıkapalidemo3 diye
+değiştirdim diyelim,bu durumda ben bu keyi primary key olarak tanımlarsam bu satırı silmem gerekecek ve bu durumda diğer tablolar ile olan ilişkisini de 
+düzenlemem gerekecektir.ya da oldu da yanlışlıkla bu key değerini github'da paylaştık diyelim,bu durumda başkalarının bu key üzerinden yapacağı sorguları
+engellemek amacıyla hızlıca bu key değerinin ismini değiştiririz ve hatayı ortadan kaldırmış oluruz.
 """
 
 class FeatureFlag(SQLModel, table=True):
