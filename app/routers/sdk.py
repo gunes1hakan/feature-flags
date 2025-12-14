@@ -3,13 +3,13 @@ from typing import Dict, Any, List
 from collections import defaultdict
 from sqlmodel import Session, select
 from app.core.db import get_session
-from app.core.cache import cache_get_json, cache_set_json
 from app.models import Environment, SDKKey, FeatureFlag, FeatureVariant, FeatureRule
 from app.core.eval import evaluate_one_flag
+from app.schemas import FlagsResponse, EvaluateUserIn, EvaluateResponse
 
 router = APIRouter()
 
-@router.get("/flags")
+@router.get("/flags", response_model=FlagsResponse)
 async def get_flags(
     env: str = Query(..., description="Hedef ortam (örn: prod, dev, staging)"),
     x_sdk_key: str = Header(alias="X-SDK-Key"),
@@ -111,11 +111,11 @@ async def get_flags(
 
     return {"env": env, "project_id": sdk.project_id, "flags": out_flags}
 
-@router.post("/evaluate")
+@router.post("/evaluate", response_model=EvaluateResponse)
 async def evaluate_flags(
     env: str = Query(..., description="Hedef ortam (örn: prod, dev, staging)"),
     x_sdk_key: str = Header(alias="X-SDK-Key"),
-    user: Dict[str, Any] = Body(..., embed=True),
+    user_in: EvaluateUserIn = Body(..., embed=False),
     session: Session = Depends(get_session),
 ):
     """
@@ -139,6 +139,8 @@ async def evaluate_flags(
     bilginin neye ait olduğunu kolay bir şekilde anlıyoruz.Şimdi bilgiyi bu şekilde düzenledik diyelim: {"user": { "country": "TR", "user_id": "u123" }}.Ardından bu bilgiler dict'te depolanırken key değerleri user olmayacak yine normal
     key değerleri "country","user_id" olacakken,value değerleri "TR","u123" olacak.
     session ile de Db bağlantısı kurabilmek için FastAPI'nin bize verdiği bağlantı havuzundan bir tane db bağlantısını alıyoruz.
+    Güncelleme:önceden kullanıcıdan aldığımız verileri dict ifadesi ile alıyorduk ama artık EvaluateUserIn class'ını kullanarak model şeklinde alıyoruz,ayriyeten artık embed'in true olmasına gerek kalmadı çünkü bu modelimizin kendisi
+    user tagını verilerimizin önüne ekliyor,biz ekstra embed=true yaparsak içiçe iki tane user görüneceğinden çirkin bir görüntü ortaya çıkar.  
     """
 
     sdk = session.exec(select(SDKKey).where(SDKKey.key == x_sdk_key)).first()
@@ -165,7 +167,6 @@ async def evaluate_flags(
     project id'si project_id olan ama ortamı env olan bilgiyi Environment tablosundan alıp environment değişkenine atıyorum.
     """
 
-    # 3) Projedeki flag’ler + bu env’in kuralları
     flags = session.exec(
         select(FeatureFlag).where(FeatureFlag.project_id == sdk.project_id)
     ).all()
@@ -218,17 +219,18 @@ async def evaluate_flags(
             flag_key=f.key,
             default_variant=f.default_variant,
             rules=rules_by_flag.get(int(f.id), []),
-            user=user,
+            user=user_in.user,
         )
         decided[f.key] = chosen
     """
     yukarıdaki kod yapısı her flag için bir variant oluşturmamızı sağlıyor.bu variant'ları decided adlı bir sözlükte key,variant şeklinde bir key value ilişkisine göre tutacağız.
     ikinci satırda ise yukarıda aldığımız flags değerlerini tek tek dolaşıyoruz ve eval.py dosyasındaki evaluate_one_flag metotu ile flag değerine bir tane variant atıyoruz,sonrasında da bu variant'ı flag'in keyi ile birleştiriyoruz
     ve decided adlı sözlüğe yolluyoruz.
+    Güncelleme:artık user ifadesini bir dict olarak değil de model olarak tuttuğumuz için model'ın adresini veriyorum.  
     """
 
     return {"env": env, "project_id": sdk.project_id, "variants": decided}
-    #en sonunda da bu bilgileri toplu olarak geri dönderiyoruz.
+    #en sonda da bu bilgileri toplu olarak geri dönderiyoruz.
 
 """
     cache_key = f"ff:flags:{sdk.project_id}:{environment.id}"
