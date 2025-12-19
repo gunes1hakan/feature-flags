@@ -1,5 +1,0 @@
-OK
-1766140770.687502 [0 172.18.0.5:47716] "GET" "ff:flags:3:3"
-1766140770.689917 [0 172.18.0.5:47716] "SETEX" "ff:flags:3:3" "120" "{\"env\": \"prod\", \"project_id\": 3, \"configs\": {}, \"flags\": [{\"key\": \"enable_dark_mode\", \"on\": true, \"default_variant\": \"off\", \"variants\": {\"dark\": {\"theme\": \"dark\"}, \"off\": {}}, \"rules\": [{\"priority\": 1, \"predicate\": {\"attr\": \"country\", \"op\": \"==\", \"value\": \"TR\"}, \"distribution\": {\"off\": 70, \"dark\": 30}}]}]}"
-1766140771.679441 [0 172.18.0.5:47716] "GET" "ff:flags:3:3"
-1766140771.861826 [0 127.0.0.1:33216] "ping"
