@@ -1,0 +1,6 @@
+- [x] A. Stabilite Kontrolü (Healthy, Logs Clean) <!-- id: 30 -->
+- [x] B. Smoke Test (Başarılı, ID: 3) <!-- id: 31 -->
+- [x] C. Redis Cache Doğrulama (Key mevcut: ff:flags:2:2) <!-- id: 32 -->
+- [x] D. Cache-hit Kanıtı (Monitor Logu: GET ff:flags...) <!-- id: 33 -->
+- [x] E. Kalıcılık Testi (Smoke Test Başarılı, ID: 1) <!-- id: 34 -->
+- [x] F. Raporlama (Sunuluyor) <!-- id: 35 -->

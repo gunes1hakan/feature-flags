@@ -1,4 +1,4 @@
-﻿from typing import Optional
+﻿from typing import Optional, Any
 from sqlmodel import SQLModel, Field, Column
 from sqlalchemy import JSON, UniqueConstraint
 """
@@ -114,4 +114,20 @@ id: 2  flag_id:10  environment_id:3  priority:2  predicate:{"attr": "country", "
 id: 3  flag_id:10  environment_id:3  priority:3  predicate:{"attr": "is_premium", "op": "==", "value": true}  distrubtion: {"dark": 80, "off": 20}
 mesela {"country": "TR", "age": 25} diye bir tane user data'mız var diyelim,predicate ksımı gidip bu data'nın içerisindeki country seçeneğine bakar ve TR ile eşit mi kontrolunu yapar,kurala uyduğu için priority numarası 1 olan kısım bu kullanıcıya
 uygulanır.
+"""
+
+class FeatureConfig(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    # env'e özel override gerekiyorsa dolu; proje-geneli için None
+    environment_id: Optional[int] = Field(default=None, foreign_key="environment.id", index=True)
+    key: str = Field(index=True)
+    value: Any = Field(default=None, sa_column=Column(JSON))
+    __table_args__ = (
+        UniqueConstraint("project_id", "key", "environment_id", name="uq_cfg_scope"),
+    )
+"""
+yukarıdaki tablo yapım featureflaglerin hangi ortamlarda hangi keylere göre çalışacağını bildirmektedir.
+__table_args__ ifadesinin içerisindek UniqueConstraint ifadesi içerisine parametre olarak alınan ifadelerden yalnızca birinin db'de olmasını sağlar.name ifadesinde ise bir hata gerçekleştiği zaman bu hatanın hangi unique de 
+gerçekleştiğini belirtir.
 """

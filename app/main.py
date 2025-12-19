@@ -1,5 +1,8 @@
 ﻿from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
+from pathlib import Path
 
 from app.core.db import init_db
 from app.routers import sdk, admin
@@ -9,12 +12,22 @@ async def lifespan(app: FastAPI):
     init_db()
     yield
 
+
 app = FastAPI(title="Feature Flags & Remote Config", lifespan=lifespan)
 """
 uygulama ilk ayağa kalkarken init_db() çağırıyor.
 bu sayede tablolar oluşturuluyor ve db hazırlanıyor.
 FastAPI kısmında ise parametre olarak yukarıda oluşturduğumuz lifespan'ı parametre olarak veriyoruz ve de başlangıçta bu işleri yap diyoruz.
 """
+
+BASE_DIR = Path(__file__).resolve().parent
+UI_DIR = BASE_DIR / "ui"
+
+app.mount("/ui", StaticFiles(directory=str(UI_DIR), html=True), name="ui")
+
+@app.get("/")
+def root():
+    return RedirectResponse(url="/ui/")
 
 @app.get("/healthz")
 def healthz():

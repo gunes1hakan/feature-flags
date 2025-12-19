@@ -3,11 +3,49 @@ from typing import Dict, Any, List
 from collections import defaultdict
 from sqlmodel import Session, select
 from app.core.db import get_session
-from app.models import Environment, SDKKey, FeatureFlag, FeatureVariant, FeatureRule
+from app.core.cache import cache_get_json, cache_set_json, flags_cache_key
+from app.models import Environment, SDKKey, FeatureFlag, FeatureVariant, FeatureRule, FeatureConfig
 from app.core.eval import evaluate_one_flag
 from app.schemas import FlagsResponse, EvaluateUserIn, EvaluateResponse
 
 router = APIRouter()
+
+def _resolve_sdk_and_environment(session: Session, env: str, x_sdk_key: str):
+    """
+    aşağıdaki endpointlerde yaptığımız tekrarlı sdk ve environment doğrulama adımlarını tek bir metot içerisinde topladık.
+    """
+    
+    sdk = session.exec(select(SDKKey).where(SDKKey.key == x_sdk_key)).first()
+    if not sdk:
+        raise HTTPException(status_code=401, detail="Invalid SDK key")
+    """
+    yukarıdaki kod satırımız da ise parametre olarak aldığımız x_sdk_key değerini SDKKey adlı tabloda arıyoruz.kod satırına geçersek:
+    select(SDKKey) ifadesi SDKKey adlı tablomuza gider,where(SDKKey.key==x_sdk_key) ifadesi ise bu SDKKey adlı tablodaki key adlı sütundaki değeri x_sdk_key olan verileri alır.exec() ifadesi girdiğimiz bu sorguyu sql cinsine çevirip 
+    DB'de çalıştırır.session ifadesi de zaten db bağlantımızdı.first() ifadesi ise birden fazla veri gelirse ilk veriyi al diyoruz.(normalde zaten models.py içerisinde key: str = Field(index=True, unique=True) satırı ile bu key değerini
+    benzersiz olarak alıyoruz yani zaten tek bir sonuç değeri geriye dönecek,ama olduda bir hata ile karşılaştık ya da oldu da key: str = Field(index=True, unique=True) kodundaki unique ifadesi silindi diyelim,bu durumları da düşünerek 
+    güvenlik acısından ikinci bir doğrulama ekleyerek ilk veriyi aldık.
+    """
+
+    environment = session.exec(   
+        select(Environment).where(
+            Environment.name == env,
+            Environment.project_id == sdk.project_id,
+        )
+    ).first()
+    if not environment:
+        raise HTTPException(status_code=404, detail="Unknown environment for this project")
+    """
+    project id'si project_id olan ama ortamı env olan bilgiyi Environment tablosundan alıp environment değişkenine atıyorum.
+    """
+
+    if int(sdk.environment_id) != int(environment.id):
+        raise HTTPException(status_code=401, detail="Invalid SDK key for this environment")
+    """
+    önceden yaptığımız doğrumalardan farklı olacak şekilde yukarıdaki doğrulamayı ekledik,önceki endpoint işlemlerimde key ve environment var mı kontrolu yapıyordum ama bu key bu environment'a ait mi kontrolu
+    yapmıyordum,artık bu doğrulama ile aynı keye sahip olup farklı env'deki bir flag bu endpointleri çalıştıramayacak.
+    """
+
+    return sdk, environment
 
 @router.get("/flags", response_model=FlagsResponse)
 async def get_flags(
@@ -22,41 +60,79 @@ async def get_flags(
     session: get_session sayesinde bize verilen veritabanı oturumunu alıyoruz.
     """
 
-    #Key bu env'e ait mi kontrolu
-    sdk = session.exec(
-        select(SDKKey).where(
-            SDKKey.key == x_sdk_key)).first()
-    if not sdk:
-        raise HTTPException(status_code=401, detail="Invalid SDK key for this environment")
+    sdk, environment = _resolve_sdk_and_environment(session=session, env=env, x_sdk_key=x_sdk_key)
+
+        # ✅ Remote Config: global + env override configs topla
+    cfg_rows = session.exec(
+        select(FeatureConfig).where(
+            FeatureConfig.project_id == sdk.project_id,
+            (FeatureConfig.environment_id == None) | (FeatureConfig.environment_id == environment.id),
+        )
+    ).all()
+
+    configs: Dict[str, Any] = {}
+
+    # 1) önce global (environment_id=None)
+    for c in cfg_rows:
+        if c.environment_id is None:
+            configs[c.key] = c.value
+
+    # 2) sonra env override (aynı key varsa üzerine yazar)
+    for c in cfg_rows:
+        if c.environment_id == environment.id:
+            configs[c.key] = c.value
+
+
+    cache_key = flags_cache_key(sdk.project_id, environment.id)
+    cached = await cache_get_json(cache_key)
+    if cached:
+        print(f"[CACHE HIT] {cache_key}")
+        return cached
+
+    print(f"[CACHE MISS] {cache_key}")
+
     """
-    gönderdiğimiz key değerininin environment id değerini sdkkey tablosundan alıyoruz.
-    eğer ki en yukarıda tanımladığımız get_flags ile aldığımız sdk_key değeri var ve de yukarıda env var mı kontrolu ile aldığımız environment değeri
-    tabloda varsa ise ilgili satırı alıyoruz,yoksa 401 hatası ile de geçerli key girilmedi hatası fırlatıyoruz.
+    yukarıda eklediğim Redis cache sayesinde önceden çektiğim bilgileri tekrardan kullancaksam db'ye gitmeme gerek kalmadan bellek üzerinden çekmemi sağlayacak.Bu da perfonmans kazandırır.
+    kod satırını yorumlarsak,ilk satırdaki cache_key daha önceden çekip cache'ye eklediğim verinin bir anahtarının olmasını sağlar.Bu sayede istenilen bilgiler uyuşursa bu bilgiye erişilir.
+    bu cache_key'in eşitliğini yorumlarsak: ff:flags bu bilginin bir feature flags flags'i cevabı olduğunu belirtir,yani prefix bir ifadedir,geri kalan bilgiler ise proje id'si ve env id'sidir.
+    diğer satırdaki cached_get_json() ise parametre olarak cache_key'in bilgisini cache'den çekip cached'a atmaktadır.Cevaba göre işlem yapılacağı için await olarak tanımlama yaptık.
+    3. satırda ise eğer ki bu cached dolu ise bilgiyi döndür diyoruz.
+    Güncelleme:cache_keylerin cache.py dosyasından oluşturulup alınması sağlandı,böylece cache'leri yanlış yazma derdi ortadan kalktı.  
     """
 
-    #Env var mı kontrolu
-    environment = session.exec(
-        select(Environment).where(
-            Environment.name == env,
-            Environment.project_id == sdk.project_id
+        # ✅ Remote Config: (global + env override) configs topla
+    cfg_rows = session.exec(
+        select(FeatureConfig).where(
+            FeatureConfig.project_id == sdk.project_id,
+            (FeatureConfig.environment_id == None) | (FeatureConfig.environment_id == environment.id),
         )
-    ).first()
-    if not environment:
-        raise HTTPException(status_code=404, detail="Unknown environment")
-    """
-    veritabanındaki environment tablosuna bakıyoruz:
-    bu tabloda name=env olan satır var mı(ör: prod,dev) kontrolunu yapıyoruz.
-    if kontrolu ile de aradığımız env yoksa 404 hatası fırlatıyoruz.
-    """
+    ).all()
+
+    configs: Dict[str, Any] = {}
+
+    # 1) önce global (environment_id=None)
+    for c in cfg_rows:
+        if c.environment_id is None:
+            configs[c.key] = c.value
+
+    # 2) sonra env override (aynı key varsa üzerine yazar)
+    for c in cfg_rows:
+        if c.environment_id == environment.id:
+            configs[c.key] = c.value
+
 
     #Bu projenin flag'lerini getir
     flags = session.exec(
         select(FeatureFlag).where(
             FeatureFlag.project_id == sdk.project_id,
+            FeatureFlag.status.in_(["active", "published"]),
         )
     ).all()
     if not flags:
-        return {"env": env, "project_id": sdk.project_id, "flags": []}
+        resp = {"env": env, "project_id": sdk.project_id,"configs": configs, "flags": []}
+        await cache_set_json(cache_key, resp, ttl_seconds=120)  # ✅ B6: Cache SET
+        return resp
+    
     flag_ids = [int(f.id) for f in flags if f.id is not None]
     """
     yukarıda değerini aldığımız sdk'nin id'sine sahip olan tüm flag yapıların getiriyoruz.
@@ -65,6 +141,8 @@ async def get_flags(
     Güncelleme2:
     -eğer ki herhangi bir flag yapısı yok ise geriye flag'i boş bir yapı olarak dönderip flag yapısının olmadığını gösteriyorum.
     -flag_ids kısmında bütün flagleri id'leri topluyoruz.
+    -Güncelleme: sdk üzerinden veri çekileceği zaman flag türü "active" ve "published" olanların verilerinin çekilmesine izin verildi.  
+    -Güncelleme2: if not flags bloğunun içi değiştirildi,artık flag değeri olmadığı zaman bu bilginin kendiside cache'ye yazıldı.
     """
 
     variants = session.exec(
@@ -105,17 +183,19 @@ async def get_flags(
             "default_variant": f.default_variant,
             "variants": variants_by_flag.get(int(f.id), {}),
             "rules": rules_by_flag.get(int(f.id), []),
-            "configs": {},
         })
 
 
-    return {"env": env, "project_id": sdk.project_id, "flags": out_flags}
+    resp = {"env": env, "project_id": sdk.project_id, "configs": configs, "flags": out_flags}
+
+    await cache_set_json(cache_key, resp, ttl_seconds=120)
+    return resp
 
 @router.post("/evaluate", response_model=EvaluateResponse)
 async def evaluate_flags(
     env: str = Query(..., description="Hedef ortam (örn: prod, dev, staging)"),
     x_sdk_key: str = Header(alias="X-SDK-Key"),
-    user_in: EvaluateUserIn = Body(..., embed=False),
+    user_in: EvaluateUserIn = Body(...),
     session: Session = Depends(get_session),
 ):
     """
@@ -143,32 +223,13 @@ async def evaluate_flags(
     user tagını verilerimizin önüne ekliyor,biz ekstra embed=true yaparsak içiçe iki tane user görüneceğinden çirkin bir görüntü ortaya çıkar.  
     """
 
-    sdk = session.exec(select(SDKKey).where(SDKKey.key == x_sdk_key)).first()
-    if not sdk:
-        raise HTTPException(status_code=401, detail="Invalid SDK key")
-    """
-    yukarıdaki kod satırımız da ise parametre olarak aldığımız x_sdk_key değerini SDKKey adlı tabloda arıyoruz.kod satırına geçersek:
-    select(SDKKey) ifadesi SDKKey adlı tablomuza gider,where(SDKKey.key==x_sdk_key) ifadesi ise bu SDKKey adlı tablodaki key adlı sütundaki değeri x_sdk_key olan verileri alır.exec() ifadesi girdiğimiz bu sorguyu sql cinsine çevirip 
-    DB'de çalıştırır.session ifadesi de zaten db bağlantımızdı.first() ifadesi ise birden fazla veri gelirse ilk veriyi al diyoruz.(normalde zaten models.py içerisinde key: str = Field(index=True, unique=True) satırı ile bu key değerini
-    benzersiz olarak alıyoruz yani zaten tek bir sonuç değeri geriye dönecek,ama olduda bir hata ile karşılaştık ya da oldu da key: str = Field(index=True, unique=True) kodundaki unique ifadesi silindi diyelim,bu durumları da düşünerek 
-    güvenlik acısından ikinci bir doğrulama ekleyerek ilk veriyi aldık.
-    """
-
-
-    environment = session.exec(
-        select(Environment).where(
-            Environment.name == env,
-            Environment.project_id == sdk.project_id
-        )
-    ).first()
-    if not environment:
-        raise HTTPException(status_code=404, detail="Unknown environment for this project")
-    """
-    project id'si project_id olan ama ortamı env olan bilgiyi Environment tablosundan alıp environment değişkenine atıyorum.
-    """
-
+    sdk, environment = _resolve_sdk_and_environment(session=session, env=env, x_sdk_key=x_sdk_key)
+    
     flags = session.exec(
-        select(FeatureFlag).where(FeatureFlag.project_id == sdk.project_id)
+        select(FeatureFlag).where(
+            FeatureFlag.project_id == sdk.project_id,
+            FeatureFlag.status.in_(["active", "published"]),
+        )
     ).all()
     if not flags:
         return {"env": env, "project_id": sdk.project_id, "variants": {}}
@@ -176,6 +237,7 @@ async def evaluate_flags(
     flag_ids = [int(f.id) for f in flags if f.id is not None]
     """
     burda flags içerisindeki verilerin id'sini toplayıp flag_ids adlı listeye atıyoruzki sürekli db'ye gitmeyelim.
+    güncelleme:status şartı eklendi.
     """
 
     variants = session.exec(
@@ -214,6 +276,9 @@ async def evaluate_flags(
     # 4) Her flag için tek bir varyant seç
     decided: Dict[str, str] = {}
     for f in flags:
+        if not f.on:
+            decided[f.key] = f.default_variant
+            continue
         chosen = evaluate_one_flag(
             project_id=sdk.project_id,
             flag_key=f.key,
@@ -227,79 +292,8 @@ async def evaluate_flags(
     ikinci satırda ise yukarıda aldığımız flags değerlerini tek tek dolaşıyoruz ve eval.py dosyasındaki evaluate_one_flag metotu ile flag değerine bir tane variant atıyoruz,sonrasında da bu variant'ı flag'in keyi ile birleştiriyoruz
     ve decided adlı sözlüğe yolluyoruz.
     Güncelleme:artık user ifadesini bir dict olarak değil de model olarak tuttuğumuz için model'ın adresini veriyorum.  
+    Güncelleme2:eğer ki flag aktif değilse varsayılan varyantı ver ve de döngüden çık diyoruz.    
     """
 
     return {"env": env, "project_id": sdk.project_id, "variants": decided}
     #en sonda da bu bilgileri toplu olarak geri dönderiyoruz.
-
-"""
-    cache_key = f"ff:flags:{sdk.project_id}:{environment.id}"
-    cached = await cache_get_json(cache_key)
-    if cached:
-        return cached  # HIT
-    
-    ilk kod satırında yer alan cache_key oluşturulurken ilk olarak sdk.project_id ile sdk key'in bağlı olduğu projenin id'si alınıyor,environment.id ile bu isteğin geldiği environment.id alınıyor. ff:flags: ifadesi de sadece anlamlı bir 
-    prefix ifadedir.
-    ikinci kod satırı ile de oluşturduğumuz bu key değerini cache.py dosyasındaki cache_get_json() metotuna yaz diyoruz.böylece bu redise bu key ile kaydedilmiş herhangi json varsa alıyoruz.
-    eğer önceden Redis'te hazırlanmış bir cevap varsa bunu geri dönderiyoruz yoksa DB'den verileri kendi almaya gidiyor.
-    """
-
-    
-
-    
-
-    
-"""
-    out_flags = []
-    for f in flags:
-        # Variants
-        variants = session.exec(
-            select(FeatureVariant).where(FeatureVariant.flag_id == f.id)
-        ).all()
-        variants_map = {v.name: {"payload": v.payload} for v in variants} or {"off": {}}
-
-        
-        her flag için oluşturduğumuz sözlükleri bir yapıda tutmak için yukarda out_flags adı ile boş bir dizi oluşturuyoruz.,sonrasında yukarıda tanımladığımız flagleri tek tek for döngüsü ile geziyoruz
-        ve bu flag'lerin bütün varyantlarını çekiyoruz.
-        variants_map kısmında ise verileri "off":  {"payload": {...}} şeklinde depoluyoruz.Bu kod yapısın açmak gerekirse:
-        bu kod yapısı FetureVariant tablosundaki payload sütunundaki verileri çekiyor ve variants_map'e atıyor,eğer ki payload kısmı boş olan bir sütun varsa da varsayılan olark "off": {} atamasını yapıyoruz.
-        
-
-        # Rules (sadece bu env)
-        rules = session.exec(
-            select(FeatureRule).where(
-                FeatureRule.flag_id == f.id,
-                FeatureRule.environment_id == environment.id
-            )
-        ).all()
-        rules_out = [   #kuralları json şekline sokkuyoruz.
-            {
-                "priority": r.priority,
-                "predicate": r.predicate,
-                "distribution": r.distribution,
-            }
-            for r in rules
-        ]
-
-        out_flags.append({      #her flag için çıktı listesi oluşturuyoruz.
-            "key": f.key,
-            "on": f.on,
-            "default_variant": f.default_variant,
-            "variants": variants_map,
-            "rules": rules_out,
-            "status": f.status,
-        })
-
-    resp = {
-        "env": env,
-        "revision": "demo-rev",
-        "flags": out_flags,
-        "configs": {},
-    }    
-
-    await cache_set_json(cache_key, resp, ttl_seconds=120)  # MISS → SET
-    
-    rediste bu bilgileri saklıyoruz.
-    
-
-    return resp #en sonunda sdk'nin kullanacağı tek bir json verisi şeklinde bilgileri geri dönderiyoruz."""

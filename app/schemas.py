@@ -25,11 +25,11 @@ class FeatureFlagOut(BaseModel):
     default_variant: str
     variants: Dict[str, Dict[str, Any]]
     rules: List[FeatureRuleOut]
-    configs: Dict[str, Any] = Field(default_factory=dict)
 
 class FlagsResponse(BaseModel):
     env: str
     project_id: int
+    configs: Dict[str, Any] = Field(default_factory=dict)
     flags: List[FeatureFlagOut]
 #FeatureFlagOut class'ı /sdk/v1/flags endpointinin içindeki Flags nesnesini düzenlerken,FlagsResponse class'ı ise komple /sdk/v1/flags endpointini düzenler.
 

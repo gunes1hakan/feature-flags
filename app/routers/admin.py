@@ -1,17 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel
+from typing import Optional, Any
 from sqlmodel import Session, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.db import get_session
 from app.core.cache import invalidate_project_sync
-from app.models import Project, Environment, SDKKey, FeatureFlag, FeatureVariant, FeatureRule
+from app.models import Project, Environment, SDKKey, FeatureFlag, FeatureVariant, FeatureRule, FeatureConfig
+from app.core.admin_auth import require_admin
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 @router.post("/projects", response_model=Project)
 def create_project(project: Project, session: Session = Depends(get_session)):
+    existing = session.exec(select(Project).where(Project.name == project.name)).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Project name already exists")
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -130,6 +135,19 @@ class StatusUpdate(BaseModel):
 """
 istek gövdesinden yollanan status alanlarının doğru yazılıp yazılmadığını kontrol eden class yapısıdır,aşağıdaki metotta kullandık.
 """
+
+class FeatureConfigCreate(BaseModel):
+    project_id: int
+    environment_id: Optional[int] = None
+    key: str
+    value: Any
+"""
+bu oluşturduğumuz class yapısı admin/v1/configs endpointinin geriye dönderiği json verisinin içinde hangi bilgilerin olacağını ve bu verilen türlerini bildiriyor.
+"""
+
+class FeatureConfigUpdate(BaseModel):
+    value: Any
+
 
 @router.patch("/flags/{flag_id}/status", response_model=FeatureFlag)
 def update_flag_status(flag_id: int, body: StatusUpdate, session: Session = Depends(get_session)):
@@ -265,3 +283,170 @@ def list_rules(flag_id: int, session: Session = Depends(get_session)):
 get/flags/{flag_id}/rules
 url'deki flag_id'ye sahip olan tüm kuralları listeler.
 """
+
+
+@router.delete("/rules/{rule_id}")
+def delete_rule(rule_id: int, session: Session = Depends(get_session)):
+    r = session.get(FeatureRule, rule_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    f = session.get(FeatureFlag, r.flag_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="Flag not found")
+
+    project_id = f.project_id
+    session.delete(r)
+    session.commit()
+
+    invalidate_project_sync(project_id)
+    return {"ok": True}
+
+
+@router.patch("/rules/{rule_id}", response_model=FeatureRule)
+def patch_rule(rule_id: int, payload: dict = Body(...), session: Session = Depends(get_session)):
+    r = session.get(FeatureRule, rule_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    f = session.get(FeatureFlag, r.flag_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="Flag not found")
+
+    variants = session.exec(
+        select(FeatureVariant).where(FeatureVariant.flag_id == r.flag_id)
+    ).all()
+    allowed = {v.name for v in variants}
+    if f.default_variant:
+        allowed.add(f.default_variant)
+
+    if "priority" in payload:
+        p = int(payload["priority"])
+        if p < 1:
+            raise HTTPException(status_code=422, detail="priority must be >= 1")
+        r.priority = p
+
+    if "predicate" in payload:
+        pred = payload["predicate"]
+        _validate_predicate(pred)
+        r.predicate = pred
+
+    if "distribution" in payload:
+        dist = payload["distribution"]
+        _validate_distribution(dist, allowed)
+        r.distribution = dist
+
+    session.add(r)
+    session.commit()
+    session.refresh(r)
+
+    invalidate_project_sync(f.project_id)
+    return r
+
+
+@router.delete("/variants/{variant_id}")
+def delete_variant(variant_id: int, session: Session = Depends(get_session)):
+    v = session.get(FeatureVariant, variant_id)
+    if not v:
+        raise HTTPException(status_code=404, detail="Variant not found")
+
+    f = session.get(FeatureFlag, v.flag_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="Flag not found")
+
+    # Safety: check if variant is used in rule distribution
+    rules = session.exec(select(FeatureRule).where(FeatureRule.flag_id == v.flag_id)).all()
+    for r in rules:
+        dist = r.distribution or {}
+        if isinstance(dist, dict) and v.name in dist:
+            raise HTTPException(
+                status_code=409,
+                detail="Variant is used in rule distribution. Delete/update rules first."
+            )
+
+    project_id = f.project_id
+    session.delete(v)
+    session.commit()
+
+    invalidate_project_sync(project_id)
+    return {"ok": True}
+
+
+@router.post("/configs", response_model=FeatureConfig)
+def create_config(payload: FeatureConfigCreate, session: Session = Depends(get_session)):
+    # 1) Check Project
+    if not session.get(Project, payload.project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # 2) Check Environment (if provided)
+    if payload.environment_id is not None:
+        env = session.get(Environment, payload.environment_id)
+        if not env:
+            raise HTTPException(status_code=404, detail="Environment not found")
+        if env.project_id != payload.project_id:
+            raise HTTPException(status_code=400, detail="Environment does not belong to this project")
+
+    # 3) Global scope duplicate check
+    if payload.environment_id is None:
+        existing = session.exec(
+            select(FeatureConfig).where(
+                FeatureConfig.project_id == payload.project_id,
+                FeatureConfig.key == payload.key,
+                FeatureConfig.environment_id == None,
+            )
+        ).first()
+        if existing:
+            raise HTTPException(status_code=409, detail="Config key already exists in global scope")
+
+    cfg = FeatureConfig(
+        project_id=payload.project_id,
+        environment_id=payload.environment_id,
+        key=payload.key,
+        value=payload.value,
+    )
+
+    session.add(cfg)
+    try:
+        session.commit()
+        session.refresh(cfg)
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Config key already exists in this scope")
+
+    invalidate_project_sync(payload.project_id)
+    return cfg
+
+
+@router.get("/configs", response_model=list[FeatureConfig])
+def list_configs(session: Session = Depends(get_session)):
+    return session.exec(select(FeatureConfig)).all()
+
+
+@router.patch("/configs/{config_id}", response_model=FeatureConfig)
+def update_config(config_id: int, body: FeatureConfigUpdate, session: Session = Depends(get_session)):
+    cfg = session.get(FeatureConfig, config_id)
+    if not cfg:
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    cfg.value = body.value
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+
+    invalidate_project_sync(cfg.project_id)
+    return cfg
+
+
+@router.delete("/configs/{config_id}")
+def delete_config(config_id: int, session: Session = Depends(get_session)):
+    cfg = session.get(FeatureConfig, config_id)
+    if not cfg:
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    project_id = cfg.project_id
+    session.delete(cfg)
+    session.commit()
+
+    invalidate_project_sync(project_id)
+    return {"ok": True}
+
