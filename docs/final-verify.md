@@ -59,12 +59,12 @@ Captured `redis-cli monitor` logs during repeated SDK requests demonstrate the i
 ```
 **Flow:** **MISS** (1st GET) → **SETEX** (Cache Write) → **HIT** (2nd GET).
 
-### Latest Run (Project 9 Evidence)
+### Latest Run (Project 12 Evidence)
 *   **Smoke Test**: `== Smoke Test DONE ✅ ==`
-    *   Created: `project_id=9`, `env_id=9`, `sdk_key=smoke-20251219_154336_u9inrx`
-*   **Redis Key**: `ff:flags:9:9`
-*   **Redis TTL**: `118` (counts down from 120s)
-*   **Redis GET (excerpt)**: `[{"env":"prod","project_id":9,...}]`
+    *   Created: `project_id=12`, `env_id=12`, `sdk_key=smoke-20251219_161209_p019fb`
+*   **Redis Key**: `ff:flags:12:12`
+*   **Redis TTL**: `108` (counts down from 120s)
+*   **Redis GET (excerpt)**: `[{"env":"prod","project_id":12,...}]`
 
 ## Next Steps
 1.  **Security Hardening:** Configure Redis authentication (password protection) in `docker-compose.yml`.
